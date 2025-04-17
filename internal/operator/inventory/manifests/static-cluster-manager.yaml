@@ -172,7 +172,7 @@ spec:
         - --leader-elect
         command:
         - /static-cluster-manager
-        image: example.com/dpf-system:v0.1.0
+        image: quay.io/itsoiref/dpf-system:v0.1.0
         livenessProbe:
           httpGet:
             path: /healthz

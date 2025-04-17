@@ -6,5 +6,5 @@ resources:
 - configmap.yaml
 images:
 - name: controller
-  newName: example.com/dpu-cni-provisioner
+  newName: quay.io/itsoiref/dpu-cni-provisioner
   newTag: v0.1.0

@@ -16,7 +16,7 @@ spec:
       containers:
       - command:
         - /dpu-detector
-        image: example.com/hostdriver:v0.1.0
+        image: quay.io/itsoiref/hostdriver:v0.1.0
         name: dpu-detector
         resources:
           limits:

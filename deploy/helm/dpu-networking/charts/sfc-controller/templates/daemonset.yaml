@@ -55,10 +55,8 @@ spec:
           mountPath: /var/run/dbus/system_bus_socket
         - mountPath: /lib
           name: lib
-        {{ if .Values.openvSwitchSharedLibrary64Dir }}
         - mountPath: /lib64
           name: lib64
-        {{ end }}
         - mountPath: /usr/bin/ovs-vsctl
           name: ovs-vsctl
         - mountPath: /usr/bin/ovs-ofctl
@@ -118,9 +116,7 @@ spec:
           path: {{ .Values.openvSwitchSharedLibraryDir }}
           type: Directory
         name: lib
-      {{ if .Values.openvSwitchSharedLibrary64Dir }}
-      - - hostPath:
-            path: {{ .Values.openvSwitchSharedLibrary64Dir }}
-            type: Directory
-          name: lib64
-      {{ end }}
+      - hostPath:
+          path: /lib64
+          type: Directory
+        name: lib64

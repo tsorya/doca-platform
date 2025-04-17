@@ -25,7 +25,7 @@ serviceDaemonSet:
 ### Service specific values ###
 resources: {}
 image:
-  repository: example.com/dummydpuservice
+  repository: quay.io/itsoiref/dummydpuservice
   pullPolicy: IfNotPresent
   tag: "v0.1.0"
 
