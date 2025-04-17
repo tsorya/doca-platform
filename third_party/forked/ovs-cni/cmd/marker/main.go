@@ -99,7 +99,7 @@ func main() {
 	wait.JitterUntil(func() {
 		jitteredReconcileInterval := wait.Jitter(time.Duration(*reconcileInterval)*time.Minute, 1.2)
 		shouldReconcileNode := time.Since(markerCache.LastRefreshTime()) >= jitteredReconcileInterval
-		CreateDefaultBridgesAndPorts(*ovsSocket, *ovsdbDriver)
+		CreateDefaultBridgesAndPorts(*ovsSocket, *ovsdbDriver, *nodeName)
 		if shouldReconcileNode {
 			reportedBridges, err := markerApp.GetReportedResources()
 			if err != nil {
@@ -122,7 +122,7 @@ func main() {
 }
 
 // TODO: HACK: (aserdean) ensure we always have br-sfc and br-hbn
-func CreateDefaultBridgesAndPorts(socketFile string, ovsDriver ovsdb.OvsBridgeDriver) {
+func CreateDefaultBridgesAndPorts(socketFile string, ovsDriver ovsdb.OvsBridgeDriver, nodeName string) {
 	ovsDB, err := ovsdb.ConnectToOvsDb(socketFile)
 	if err != nil {
 		glog.Warningf("failed to connect to ovsdb socket %s: error: %v", socketFile, err)
@@ -136,7 +136,7 @@ func CreateDefaultBridgesAndPorts(socketFile string, ovsDriver ovsdb.OvsBridgeDr
 	}
 
 	if !bridgeExist {
-		bridgeEnsure, err := ovsDriver.EnsureBridge(ovsdb.SfcBridge)
+		bridgeEnsure, err := ovsDriver.EnsureBridge(ovsdb.SfcBridge, nodeName)
 		if err != nil {
 			glog.Warningf("EnsureBridge failed: %v", err)
 		}
@@ -145,18 +145,24 @@ func CreateDefaultBridgesAndPorts(socketFile string, ovsDriver ovsdb.OvsBridgeDr
 		}
 	}
 
-	bridgeExist, err = ovsDriver.IsBridgePresent(ovsdb.HbnBridge)
-	if err != nil {
-		glog.Warningf("IsBridgePresent failed: %v", err)
-	}
-
-	if !bridgeExist {
-		bridgeEnsure, err := ovsDriver.EnsureBridge(ovsdb.HbnBridge)
+	// for loop that runs 3 times
+	for i := 0; i < 3; i++ {
+		bridgeExist, err = ovsDriver.IsBridgePresent(ovsdb.HbnBridge)
+		glog.Infof("br-hbn present loop %d: %t", i, bridgeExist)
 		if err != nil {
-			glog.Warningf("EnsureBridge failed: %v", err)
+			glog.Warningf("IsBridgePresent failed: %v", err)
 		}
-		if !bridgeEnsure {
-			glog.Warningf("failed to create bridge %s", ovsdb.HbnBridge)
+
+		if !bridgeExist {
+			glog.Infof("AAAAAAAAAAAAAAAAAAAAAAAAAAAA loop %d", i)
+			bridgeEnsure, err := ovsDriver.EnsureBridge(ovsdb.HbnBridge, nodeName)
+			if err != nil {
+				glog.Warningf("EnsureBridge failed: %v", err)
+			}
+			glog.Infof("BBBBBBBBBBBBBBBBBBB loop %d", i)
+			if !bridgeEnsure {
+				glog.Warningf("failed to create bridge %s", ovsdb.HbnBridge)
+			}
 		}
 	}
 	ovsDriver.OvsClient.Disconnect()

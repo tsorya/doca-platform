@@ -22,5 +22,6 @@ A Helm chart for Kubernetes
 | imagePullSecrets | list | `[]` |  |
 | openvSwitchBinDir | string | `"/usr/bin"` |  |
 | openvSwitchRunDir | string | `"/var/run/openvswitch"` |  |
+| openvSwitchSharedLibrary64Dir | string | `""` |  |
 | openvSwitchSharedLibraryDir | string | `"/lib"` |  |
 

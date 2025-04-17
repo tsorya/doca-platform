@@ -192,11 +192,12 @@ func additionalValuesForComponent(name string, vars Variables) ([]StructuredEdit
 }
 
 var (
-	cniBinDirPathKey                   = "cniBinDir"
-	cniConfDirPathKey                  = "cniConfDir"
-	openvSwitchRunDirPathKey           = "openvSwitchRunDir"
-	openvSwitchBinDirPathKey           = "openvSwitchBinDir"
-	openvSwitchSharedLibraryDirPathKey = "openvSwitchSharedLibraryDir"
+	cniBinDirPathKey                     = "cniBinDir"
+	cniConfDirPathKey                    = "cniConfDir"
+	openvSwitchRunDirPathKey             = "openvSwitchRunDir"
+	openvSwitchBinDirPathKey             = "openvSwitchBinDir"
+	openvSwitchSharedLibraryDirPathKey   = "openvSwitchSharedLibraryDir"
+	openvSwitchSharedLibrary64DirPathKey = "openvSwitchSharedLibrary64Dir"
 )
 
 func ovsHelperEdits(vars Variables) ([]StructuredEdit, error) {
@@ -212,6 +213,7 @@ func sfcControllerEdits(vars Variables) ([]StructuredEdit, error) {
 		dpuServiceAddValueEdit(vars.DPUOpenvSwitchRunPath, operatorv1.SFCControllerName, openvSwitchRunDirPathKey),
 		dpuServiceAddValueEdit(vars.DPUOpenvSwitchBinPath, operatorv1.SFCControllerName, openvSwitchBinDirPathKey),
 		dpuServiceAddValueEdit(vars.DPUOpenvSwitchSharedLibPath, operatorv1.SFCControllerName, openvSwitchSharedLibraryDirPathKey),
+		dpuServiceAddValueEdit(vars.DPUOpenvSwitchSharedLib64Path, operatorv1.SFCControllerName, openvSwitchSharedLibrary64DirPathKey),
 	}, nil
 }
 func ovsCNIEdits(vars Variables) ([]StructuredEdit, error) {

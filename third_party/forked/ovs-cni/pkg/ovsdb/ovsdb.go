@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/golang/glog"
 	"hash/fnv"
 	"log"
 	"os/exec"
@@ -802,10 +803,9 @@ func (ovsd *OvsDriver) IsPortPresent(port string) (bool, error) {
 }
 
 // EnsureBridge Checks if the bridge entry already exists
-func (ovsd *OvsDriver) EnsureBridge(bridgeName string) (bool, error) {
+func (ovsd *OvsDriver) EnsureBridge(bridgeName string, nodeName string) (bool, error) {
 	bridge := make(map[string]interface{})
 	bridge["name"] = bridgeName
-
 	bridge["datapath_type"] = "netdev"
 	bridge["fail_mode"] = "secure"
 
@@ -815,13 +815,15 @@ func (ovsd *OvsDriver) EnsureBridge(bridgeName string) (bool, error) {
 		Table:    "Bridge",
 		Row:      bridge,
 	}
+
+	glog.Infof("Ensuring bridge2 %s %s", bridgeName, nodeName)
 	// Inserting/Deleting a Bridge row in Bridge table requires mutating
 	// the open_vswitch table.
 	brUuid := []ovsdb.UUID{{GoUUID: "dummy"}}
 	mutateUuid := brUuid
 	mutateSet, _ := ovsdb.NewOvsSet(mutateUuid)
 	mutation := ovsdb.NewMutation("bridges", ovsdb.MutateOperationInsert, mutateSet)
-	condition := ovsdb.NewCondition("system_type", ovsdb.ConditionEqual, "ubuntu")
+	condition := ovsdb.NewCondition("system_type", ovsdb.ConditionNotEqual, "")
 
 	// simple mutate operation
 	mutateOp := ovsdb.Operation{
@@ -835,9 +837,11 @@ func (ovsd *OvsDriver) EnsureBridge(bridgeName string) (bool, error) {
 
 	_, err := ovsd.ovsdbTransact(operations)
 	if err != nil {
+		glog.Errorf("Failed to ensure bridge %s: %v", bridgeName, err)
 		return false, err
 	}
 
+	glog.Infof("Successfully ensured bridge %s", bridgeName)
 	return true, nil
 }
 

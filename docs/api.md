@@ -349,6 +349,7 @@ _Appears in:_
 | `dpuOpenvSwitchRunPath` _string_ | DPUOpenvSwitchPath is the path at which the openvSwitch run directory can be found on the DPU.<br />This is /var/run/openvswitch by default.<br />This setting does not change where components are installed. Installation location fixed in the BFB. |  |  |
 | `dpuOpenvSwitchBinPath` _string_ | DPUOpenvSwitchBinPath is the path at which the openvSwitch bin directory can be found on the DPU node.<br />This is /usr/bin/ by default.<br />This setting does not change where components are installed. Installation location fixed in the BFB. |  |  |
 | `dpuOpenvSwitchSystemSharedPath` _string_ | DPUOpenvSwitchSystemSharedLibPath is the path at which the system lib used by OVS components can be found on the DPU.<br />This is /lib by default.<br />This setting does not change where components are installed. Installation location fixed in the BFB. |  |  |
+| `dpuOpenvSwitchSystemShared64Path` _string_ | DPUOpenvSwitchSystemSharedLib64Path is the path at which the system lib used by OVS components can be found on the DPU.<br />This is empty by default.<br />This setting does not change where components are installed. Installation location fixed in the BFB. |  |  |
 
 
 #### ProvisioningControllerConfiguration

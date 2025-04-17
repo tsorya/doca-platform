@@ -1,4 +1,4 @@
-FROM --platform=${BUILDPLATFORM} golang:1.23 as builder
+FROM --platform=linux/arm64 golang:1.23 as builder
 
 RUN mkdir /workdir
 WORKDIR /workdir

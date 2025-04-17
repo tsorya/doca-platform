@@ -23,11 +23,12 @@ import (
 
 func newDefaultVariables(defaults *release.Defaults) Variables {
 	return Variables{
-		DPUCNIBinPath:               "/opt/cni/bin",
-		DPUCNIConfPath:              "/etc/cni/net.d/",
-		DPUOpenvSwitchRunPath:       "/var/run/openvswitch/",
-		DPUOpenvSwitchBinPath:       "/usr/bin/",
-		DPUOpenvSwitchSharedLibPath: "/lib",
+		DPUCNIBinPath:                 "/opt/cni/bin",
+		DPUCNIConfPath:                "/etc/cni/net.d/",
+		DPUOpenvSwitchRunPath:         "/var/run/openvswitch/",
+		DPUOpenvSwitchBinPath:         "/usr/bin/",
+		DPUOpenvSwitchSharedLibPath:   "/lib",
+		DPUOpenvSwitchSharedLib64Path: "",
 		DisableSystemComponents: map[string]bool{
 			operatorv1.ProvisioningControllerName: false,
 			operatorv1.DPUServiceControllerName:   false,
@@ -78,19 +79,20 @@ func newDefaultVariables(defaults *release.Defaults) Variables {
 
 // Variables contains information required to generate manifests from the inventory.
 type Variables struct {
-	Namespace                   string
-	DPUCNIBinPath               string
-	DPUCNIConfPath              string
-	DPUOpenvSwitchRunPath       string
-	DPUOpenvSwitchBinPath       string
-	DPUOpenvSwitchSharedLibPath string
-	DPFProvisioningController   DPFProvisioningVariables
-	Networking                  Networking
-	DisableSystemComponents     map[string]bool
-	ImagePullSecrets            []string
-	Images                      map[string]string
-	HelmCharts                  map[string]string
-	DPUDetectorCollectors       map[string]bool
+	Namespace                     string
+	DPUCNIBinPath                 string
+	DPUCNIConfPath                string
+	DPUOpenvSwitchRunPath         string
+	DPUOpenvSwitchBinPath         string
+	DPUOpenvSwitchSharedLibPath   string
+	DPUOpenvSwitchSharedLib64Path string
+	DPFProvisioningController     DPFProvisioningVariables
+	Networking                    Networking
+	DisableSystemComponents       map[string]bool
+	ImagePullSecrets              []string
+	Images                        map[string]string
+	HelmCharts                    map[string]string
+	DPUDetectorCollectors         map[string]bool
 }
 
 type DPFProvisioningVariables struct {
@@ -169,6 +171,9 @@ func VariablesFromDPFOperatorConfig(defaults *release.Defaults, config *operator
 		}
 		if config.Spec.Overrides.DPUOpenvSwitchSystemSharedLibPath != nil {
 			variables.DPUOpenvSwitchSharedLibPath = *config.Spec.Overrides.DPUOpenvSwitchSystemSharedLibPath
+		}
+		if config.Spec.Overrides.DPUOpenvSwitchSystemSharedLib64Path != nil {
+			variables.DPUOpenvSwitchSharedLib64Path = *config.Spec.Overrides.DPUOpenvSwitchSystemSharedLib64Path
 		}
 		if config.Spec.Overrides.DPUOpenvSwitchRunPath != nil {
 			variables.DPUOpenvSwitchRunPath = *config.Spec.Overrides.DPUOpenvSwitchRunPath

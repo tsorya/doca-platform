@@ -19,6 +19,7 @@ ifeq ($(UNAME), x86_64)
 else ifeq ($(UNAME), aarch64)
 	GOARCH ?= arm64
 endif
+export GOARCH=arm64
 ORG_PATH = github.com/k8snetworkplumbingwg
 PACKAGE = ovs-cni
 OCI_BIN ?= $(shell if podman ps >/dev/null 2>&1; then echo podman; elif docker ps >/dev/null 2>&1; then echo docker; fi)
@@ -80,7 +81,7 @@ functest: $(GO)
 
 docker-build:
 	hack/get_version.sh > .version
-	$(OCI_BIN) build --build-arg goarch=${GOARCH} -t ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} -f ./cmd/Dockerfile .
+	$(OCI_BIN) build --platform linux/arm64 --build-arg goarch=${GOARCH} -t ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG} -f ./cmd/Dockerfile .
 
 docker-push:
 	$(OCI_BIN) push ${TLS_SETTING} ${REGISTRY}/ovs-cni-plugin:${IMAGE_TAG}

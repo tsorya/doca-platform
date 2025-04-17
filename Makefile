@@ -791,7 +791,7 @@ docker-build-ovn-kubernetes-for-%: $(OVNKUBERNETES_DIR)
 		--build-arg gcflags=$(GO_GCFLAGS) \
 		--build-arg ovn_kubernetes_dir=$(subst $(CURDIR)/,,$(OVNKUBERNETES_DIR)) \
 		-f Dockerfile.ovn-kubernetes \
-		. \
+  		. \
 		-t $(OVNKUBERNETES_IMAGE):$(TAG)-$*
 
 .PHONY: docker-push-ovn-kubernetes # Push a multi-arch image for ovn-kubernetes using `docker manifest`. The variable DPF_SYSTEM_ARCH defines which architectures this target pushes for.

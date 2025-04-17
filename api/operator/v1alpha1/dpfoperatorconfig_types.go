@@ -79,6 +79,12 @@ type Overrides struct {
 	// This setting does not change where components are installed. Installation location fixed in the BFB.
 	// +optional
 	DPUOpenvSwitchSystemSharedLibPath *string `json:"dpuOpenvSwitchSystemSharedPath,omitempty"`
+
+	// DPUOpenvSwitchSystemSharedLib64Path is the path at which the system lib used by OVS components can be found on the DPU.
+	// This is empty by default.
+	// This setting does not change where components are installed. Installation location fixed in the BFB.
+	// +optional
+	DPUOpenvSwitchSystemSharedLib64Path *string `json:"dpuOpenvSwitchSystemShared64Path,omitempty"`
 }
 
 // Networking defines the networking configuration for the system components.
