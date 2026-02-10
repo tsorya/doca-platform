@@ -22,10 +22,11 @@ set -euo pipefail
 # Configuration from environment with defaults
 : "${DOCKER_BUILD_LOGGING:=false}"
 : "${ARTIFACTS_DIR:=./artifacts}"
+: "${DOCKER_BUILDX:=docker buildx}"
 
 # Execute the docker buildx build command with all passed arguments
 set +e
-docker buildx build "$@"
+$DOCKER_BUILDX build "$@"
 BUILD_EXIT=$?
 set -e
 
@@ -56,7 +57,7 @@ if [[ "$DOCKER_BUILD_LOGGING" == "true" ]]; then
 	fi
 
 	LOG_FILE="${ARTIFACTS_DIR}/docker-build-log-${LOG_NAME}.json"
-	docker buildx history logs --progress=rawjson 1> "$LOG_FILE" 2>&1 || true
+	$DOCKER_BUILDX history logs --progress=rawjson 1> "$LOG_FILE" 2>&1 || true
 fi
 
 # Exit with original build exit code
