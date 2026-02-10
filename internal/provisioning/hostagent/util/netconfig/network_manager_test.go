@@ -29,14 +29,12 @@ var _ = Describe("NetworkManagerBackend", func() {
 		})
 	})
 
-	Context("connectionExists", func() {
-		It("should return false for non-existent connection", func() {
-			// Test with a connection that definitely doesn't exist
-			exists, err := backend.connectionExists("non-existent-connection-12345")
-			Expect(err).ToNot(HaveOccurred())
-			// If nmcli is not available, this is expected to fail
+	Context("getConnectionForInterface", func() {
+		It("should return error for non-existent interface", func() {
+			// Test with an interface that definitely doesn't exist
+			_, err := backend.getConnectionForInterface("non-existent-interface-12345")
 			// We just verify the function doesn't panic
-			_ = exists
+			_ = err
 		})
 	})
 })

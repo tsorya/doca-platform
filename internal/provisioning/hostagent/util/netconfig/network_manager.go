@@ -17,13 +17,16 @@ const (
 	nmPath          = "/org/freedesktop/NetworkManager"
 	nmSettingsPath  = "/org/freedesktop/NetworkManager/Settings"
 	nmSettingsIface = "org.freedesktop.NetworkManager.Settings"
-	nmConnIface     = "org.freedesktop.NetworkManager.Connection"
+	nmConnIface     = "org.freedesktop.NetworkManager.Settings.Connection"
 	nmIface         = "org.freedesktop.NetworkManager"
 )
 
 // NetworkManagerBackend implements Backend interface using NetworkManager via D-Bus
 type NetworkManagerBackend struct {
 	conn *dbus.Conn
+	// modifiedConnPaths tracks connections modified during configuration
+	// so that ApplyConfiguration can activate them regardless of their name
+	modifiedConnPaths []dbus.ObjectPath
 }
 
 // NewNetworkManagerBackend creates a new NetworkManager backend
@@ -108,34 +111,16 @@ func (n *NetworkManagerBackend) ConfigurePFInterfaces(pciAddress string, portCon
 			return false, fmt.Errorf("failed to get PF%d interface name: %w", portConfig.PortNumber, err)
 		}
 
-		// Connection name follows convention: dpu-pf<N>-<interface-name>
-		connName := fmt.Sprintf("dpu-pf%d-%s", portConfig.PortNumber, interfaceName)
-
-		// Check if connection exists, create if not
-		exists, err := n.connectionExists(connName)
+		// Find or create connection by interface name
+		connPath, err := n.getOrCreateConnectionForInterface(interfaceName, "802-3-ethernet")
 		if err != nil {
-			return false, fmt.Errorf("failed to check connection %s existence: %w", connName, err)
+			return false, fmt.Errorf("failed to get/create connection for PF%d (%s): %w", portConfig.PortNumber, interfaceName, err)
 		}
 
-		if !exists {
-			klog.V(3).Infof("Creating NetworkManager connection %s for interface %s", connName, interfaceName)
-			if err := n.createConnection(connName, "802-3-ethernet", interfaceName); err != nil {
-				return false, fmt.Errorf("failed to create connection %s: %w", connName, err)
-			}
-			needsApply = true
-		}
-
-		// Get connection for modifications
-		conn, err := n.getConnectionByName(connName)
-		if err != nil {
-			return false, fmt.Errorf("failed to get connection %s: %w", connName, err)
-		}
-
-		settings, err := n.getConnectionSettings(conn)
-		if err != nil {
-			return false, fmt.Errorf("failed to get settings for %s: %w", connName, err)
-		}
-
+		// Build minimal settings with only the properties that need changing.
+		// We avoid read-modify-write of the full settings because Go's dbus library
+		// may deserialize complex NM types (e.g. ipv6.addresses) into incompatible formats.
+		updateSettings := make(map[string]map[string]dbus.Variant)
 		modified := false
 
 		// Configure MTU if specified
@@ -147,10 +132,9 @@ func (n *NetworkManagerBackend) ConfigurePFInterfaces(pciAddress string, portCon
 
 			if currentMTU != int(*portConfig.MTU) {
 				klog.Infof("%s MTU mismatch (current=%d, desired=%d)", interfaceName, currentMTU, *portConfig.MTU)
-				if settings["802-3-ethernet"] == nil {
-					settings["802-3-ethernet"] = make(map[string]dbus.Variant)
+				updateSettings["802-3-ethernet"] = map[string]dbus.Variant{
+					"mtu": dbus.MakeVariant(uint32(*portConfig.MTU)),
 				}
-				settings["802-3-ethernet"]["mtu"] = dbus.MakeVariant(uint32(*portConfig.MTU))
 				modified = true
 			}
 		}
@@ -168,19 +152,19 @@ func (n *NetworkManagerBackend) ConfigurePFInterfaces(pciAddress string, portCon
 				if *portConfig.DHCP {
 					method = "auto"
 				}
-				if settings["ipv4"] == nil {
-					settings["ipv4"] = make(map[string]dbus.Variant)
+				updateSettings["ipv4"] = map[string]dbus.Variant{
+					"method": dbus.MakeVariant(method),
 				}
-				settings["ipv4"]["method"] = dbus.MakeVariant(method)
 				modified = true
 			}
 		}
 
 		// Update connection if modified
 		if modified {
-			if err := n.updateConnection(conn, settings); err != nil {
-				return false, fmt.Errorf("failed to update connection %s: %w", connName, err)
+			if err := n.updateConnection(connPath, updateSettings); err != nil {
+				return false, fmt.Errorf("failed to update connection for %s: %w", interfaceName, err)
 			}
+			n.trackModifiedConnection(connPath)
 			needsApply = true
 		}
 	}
@@ -188,111 +172,109 @@ func (n *NetworkManagerBackend) ConfigurePFInterfaces(pciAddress string, portCon
 	return needsApply, nil
 }
 
-// ConfigureBridgeMTU configures the MTU for a bridge interface using NetworkManager
-// Returns (needsApply, error) where needsApply indicates if changes were made
+// ConfigureBridgeMTU configures the MTU for a bridge and its member interfaces using NetworkManager.
+// The bridge and each member are checked and configured independently -- a member MTU mismatch
+// does not trigger bridge reconfiguration and vice versa.
+// Returns (needsApply, error) where needsApply indicates if any changes were made
 func (n *NetworkManagerBackend) ConfigureBridgeMTU(bridgeName string, mtu int) (bool, error) {
-	// Check if changes are needed first
-	needsApply, err := n.checkBridgeMTUChangeNeeded(bridgeName, mtu)
+	klog.Infof("ConfigureBridgeMTU: bridge=%s, desiredMTU=%d", bridgeName, mtu)
+	needsApply := false
+
+	// Configure bridge MTU if needed
+	currentBridgeMTU, err := util.GetCurrentMTU(bridgeName)
 	if err != nil {
-		return false, fmt.Errorf("failed to check bridge MTU state: %w", err)
+		return false, fmt.Errorf("failed to get current bridge MTU: %w", err)
+	}
+	klog.Infof("Bridge %s current MTU: %d", bridgeName, currentBridgeMTU)
+
+	if currentBridgeMTU != mtu {
+		klog.Infof("Bridge %s MTU mismatch (current=%d, desired=%d), configuring...", bridgeName, currentBridgeMTU, mtu)
+
+		bridgeConnPath, err := n.getOrCreateConnectionForInterface(bridgeName, "bridge")
+		if err != nil {
+			return false, fmt.Errorf("failed to get/create connection for bridge %s: %w", bridgeName, err)
+		}
+
+		// Build minimal settings with only the properties we need to modify.
+		// We avoid read-modify-write of the full settings because Go's dbus library
+		// may deserialize complex NM types (e.g. ipv6.addresses) into incompatible formats.
+		bridgeSettings := map[string]map[string]dbus.Variant{
+			"bridge": {},
+		}
+
+		if err := n.updateConnection(bridgeConnPath, bridgeSettings); err != nil {
+			return false, fmt.Errorf("failed to update bridge connection for %s: %w", bridgeName, err)
+		}
+		n.trackModifiedConnection(bridgeConnPath)
+		needsApply = true
+		klog.Infof("Bridge %s connection updated successfully", bridgeName)
+	} else {
+		klog.Infof("Bridge %s MTU already correct (%d), skipping", bridgeName, mtu)
 	}
 
-	if !needsApply {
-		klog.V(3).Infof("Bridge %s and members already have correct MTU %d", bridgeName, mtu)
-		return false, nil
-	}
-
-	// Get bridge member interfaces
+	// Configure each member independently if its MTU doesn't match
 	memberNames, err := util.GetBridgeMembers(bridgeName)
 	if err != nil {
 		return false, fmt.Errorf("failed to get bridge members for %s: %w", bridgeName, err)
 	}
+	klog.Infof("Bridge %s has %d members: %v", bridgeName, len(memberNames), memberNames)
 
-	// Configure bridge connection
-	bridgeConnName := fmt.Sprintf("dpu-bridge-%s", bridgeName)
-	exists, err := n.connectionExists(bridgeConnName)
-	if err != nil {
-		return false, fmt.Errorf("failed to check bridge connection existence: %w", err)
-	}
-
-	if !exists {
-		klog.V(3).Infof("Creating NetworkManager bridge connection %s", bridgeConnName)
-		if err := n.createConnection(bridgeConnName, "bridge", bridgeName); err != nil {
-			return false, fmt.Errorf("failed to create bridge connection: %w", err)
-		}
-	}
-
-	// Set bridge MTU
-	bridgeConn, err := n.getConnectionByName(bridgeConnName)
-	if err != nil {
-		return false, fmt.Errorf("failed to get bridge connection: %w", err)
-	}
-
-	bridgeSettings, err := n.getConnectionSettings(bridgeConn)
-	if err != nil {
-		return false, fmt.Errorf("failed to get bridge settings: %w", err)
-	}
-
-	if bridgeSettings["bridge"] == nil {
-		bridgeSettings["bridge"] = make(map[string]dbus.Variant)
-	}
-	// Note: Bridge MTU is set on the bridge interface itself, not on the bridge settings
-	// We set it on member interfaces instead
-
-	if err := n.updateConnection(bridgeConn, bridgeSettings); err != nil {
-		return false, fmt.Errorf("failed to update bridge connection: %w", err)
-	}
-
-	// Configure MTU for all bridge member interfaces
 	for _, memberName := range memberNames {
-		memberConnName := fmt.Sprintf("dpu-bridge-member-%s", memberName)
-		exists, err := n.connectionExists(memberConnName)
+		currentMTU, err := util.GetCurrentMTU(memberName)
 		if err != nil {
-			return false, fmt.Errorf("failed to check member connection %s existence: %w", memberConnName, err)
+			return false, fmt.Errorf("failed to get current MTU for member %s: %w", memberName, err)
 		}
 
-		if !exists {
-			klog.V(3).Infof("Creating NetworkManager connection %s for bridge member %s", memberConnName, memberName)
-			if err := n.createConnection(memberConnName, "802-3-ethernet", memberName); err != nil {
-				return false, fmt.Errorf("failed to create member connection %s: %w", memberConnName, err)
-			}
+		if currentMTU == mtu {
+			klog.Infof("Member %s MTU already correct (%d), skipping", memberName, mtu)
+			continue
 		}
 
-		// Get member connection
-		memberConn, err := n.getConnectionByName(memberConnName)
+		klog.Infof("Bridge member %s MTU mismatch (current=%d, desired=%d), configuring...", memberName, currentMTU, mtu)
+
+		memberConnPath, err := n.getOrCreateConnectionForInterface(memberName, "802-3-ethernet")
 		if err != nil {
-			return false, fmt.Errorf("failed to get member connection %s: %w", memberConnName, err)
+			return false, fmt.Errorf("failed to get/create connection for member %s: %w", memberName, err)
 		}
 
-		memberSettings, err := n.getConnectionSettings(memberConn)
-		if err != nil {
-			return false, fmt.Errorf("failed to get member settings for %s: %w", memberConnName, err)
+		// Build minimal settings with only the properties we need to modify.
+		memberSettings := map[string]map[string]dbus.Variant{
+			"802-3-ethernet": {
+				"mtu": dbus.MakeVariant(uint32(mtu)),
+			},
+			"connection": {
+				"master":     dbus.MakeVariant(bridgeName),
+				"slave-type": dbus.MakeVariant("bridge"),
+			},
 		}
 
-		// Set member interface MTU
-		if memberSettings["802-3-ethernet"] == nil {
-			memberSettings["802-3-ethernet"] = make(map[string]dbus.Variant)
-		}
-		memberSettings["802-3-ethernet"]["mtu"] = dbus.MakeVariant(uint32(mtu))
-
-		// Set member as bridge slave
-		if memberSettings["connection"] == nil {
-			memberSettings["connection"] = make(map[string]dbus.Variant)
-		}
-		memberSettings["connection"]["master"] = dbus.MakeVariant(bridgeName)
-		memberSettings["connection"]["slave-type"] = dbus.MakeVariant("bridge")
-
-		if err := n.updateConnection(memberConn, memberSettings); err != nil {
+		if err := n.updateConnection(memberConnPath, memberSettings); err != nil {
 			return false, fmt.Errorf("failed to update member %s: %w", memberName, err)
 		}
+		n.trackModifiedConnection(memberConnPath)
+		needsApply = true
+		klog.Infof("Member %s connection updated successfully", memberName)
 	}
 
-	return true, nil
+	klog.Infof("ConfigureBridgeMTU done: bridge=%s, needsApply=%v", bridgeName, needsApply)
+	return needsApply, nil
 }
 
 // ApplyConfiguration activates connections to apply pending configuration changes
 func (n *NetworkManagerBackend) ApplyConfiguration() error {
 	klog.Infof("Activating NetworkManager connections")
+
+	// First, activate any connections that were modified by interface name lookups
+	// (e.g. from ConfigureBridgeMTU). These may have arbitrary names.
+	activated := make(map[dbus.ObjectPath]bool)
+	for _, connPath := range n.modifiedConnPaths {
+		klog.Infof("Activating modified connection %s", connPath)
+		if err := n.activateConnection(connPath); err != nil {
+			klog.Infof("Failed to activate modified connection %s (may be expected): %v", connPath, err)
+		}
+		activated[connPath] = true
+	}
+	n.modifiedConnPaths = nil
 
 	conn, err := n.getDBusConn()
 	if err != nil {
@@ -305,8 +287,13 @@ func (n *NetworkManagerBackend) ApplyConfiguration() error {
 		return fmt.Errorf("failed to list connections: %w", err)
 	}
 
-	// Activate all dpu-* connections
+	// Activate all dpu-* connections (from ConfigurePFInterfaces etc.)
 	for _, connPath := range connections {
+		// Skip if already activated above
+		if activated[connPath] {
+			continue
+		}
+
 		connObj := conn.Object(nmService, connPath)
 
 		var settings map[string]map[string]dbus.Variant
@@ -331,10 +318,10 @@ func (n *NetworkManagerBackend) ApplyConfiguration() error {
 			continue
 		}
 
-		klog.V(3).Infof("Activating connection %s", connID)
+		klog.Infof("Activating connection %s", connID)
 		// Try to activate, but don't fail if already active or device unavailable
 		if err := n.activateConnection(connPath); err != nil {
-			klog.V(3).Infof("Failed to activate connection %s (may be expected): %v", connID, err)
+			klog.Infof("Failed to activate connection %s (may be expected): %v", connID, err)
 		}
 	}
 
@@ -393,23 +380,27 @@ func (n *NetworkManagerBackend) IsDHCPConfigured(interfaceName string) (bool, er
 
 // Helper functions
 
-// connectionExists checks if a NetworkManager connection profile exists
-func (n *NetworkManagerBackend) connectionExists(connName string) (bool, error) {
-	_, err := n.getConnectionByName(connName)
-	return err == nil, nil
-}
+// getConnectionForInterface finds a connection that manages the given interface.
+// It uses a two-tier approach:
+// 1. First looks for connections with explicit interface-name property matching (most reliable)
+// 2. Falls back to matching by connection ID (name), since some connections (e.g. bridges)
+//    may not have interface-name set but are matched by NM via their name
+func (n *NetworkManagerBackend) getConnectionForInterface(interfaceName string) (dbus.ObjectPath, error) {
+	klog.Infof("Searching for connection managing interface %s", interfaceName)
 
-// getConnectionByName finds a connection by its ID (name)
-func (n *NetworkManagerBackend) getConnectionByName(connName string) (dbus.ObjectPath, error) {
 	connections, err := n.listConnections()
 	if err != nil {
 		return "", err
 	}
+	klog.Infof("Found %d total NM connections to search through", len(connections))
 
 	conn, err := n.getDBusConn()
 	if err != nil {
 		return "", err
 	}
+
+	var matchByID dbus.ObjectPath
+	matchByIDFound := false
 
 	for _, connPath := range connections {
 		connObj := conn.Object(nmService, connPath)
@@ -417,17 +408,92 @@ func (n *NetworkManagerBackend) getConnectionByName(connName string) (dbus.Objec
 		var settings map[string]map[string]dbus.Variant
 		err := connObj.Call(nmConnIface+".GetSettings", 0).Store(&settings)
 		if err != nil {
+			klog.Infof("  Connection %s: GetSettings failed: %v", connPath, err)
 			continue
 		}
 
-		if idVariant, ok := settings["connection"]["id"]; ok {
-			if id, ok := idVariant.Value().(string); ok && id == connName {
-				return connPath, nil
+		connSettings, ok := settings["connection"]
+		if !ok {
+			klog.Infof("  Connection %s: no 'connection' section in settings", connPath)
+			continue
+		}
+
+		// Extract connection ID and interface-name for logging
+		connID := "<unknown>"
+		if idVariant, ok := connSettings["id"]; ok {
+			if id, ok := idVariant.Value().(string); ok {
+				connID = id
 			}
+		}
+		connIfName := "<not set>"
+		if ifnameVariant, ok := connSettings["interface-name"]; ok {
+			if ifname, ok := ifnameVariant.Value().(string); ok {
+				connIfName = ifname
+			}
+		}
+		klog.Infof("  Connection %s: id=%q, interface-name=%q", connPath, connID, connIfName)
+
+		// Priority 1: match by explicit interface-name property
+		if connIfName != "<not set>" && connIfName == interfaceName {
+			klog.Infof("  -> Matched by interface-name")
+			return connPath, nil
+		}
+
+		// Priority 2: remember first match by connection ID (name)
+		if !matchByIDFound && connID == interfaceName {
+			matchByID = connPath
+			matchByIDFound = true
+			klog.Infof("  -> Candidate match by connection ID")
 		}
 	}
 
-	return "", fmt.Errorf("connection %s not found", connName)
+	// Return connection matched by ID if no interface-name match was found
+	if matchByIDFound {
+		klog.Infof("No interface-name match, using ID match at %s for interface %s", matchByID, interfaceName)
+		return matchByID, nil
+	}
+
+	klog.Infof("No connection found for interface %s (checked %d connections)", interfaceName, len(connections))
+	return "", fmt.Errorf("no connection found for interface %s", interfaceName)
+}
+
+// getOrCreateConnectionForInterface finds an existing connection for the interface,
+// or creates a new one if none exists. Lookups are done by interface name and connection ID.
+func (n *NetworkManagerBackend) getOrCreateConnectionForInterface(interfaceName, connType string) (dbus.ObjectPath, error) {
+	klog.Infof("getOrCreateConnectionForInterface: interface=%s, type=%s", interfaceName, connType)
+
+	// Try to find existing connection by interface name or connection ID
+	connPath, err := n.getConnectionForInterface(interfaceName)
+	if err == nil {
+		klog.Infof("Found existing connection %s for interface %s", connPath, interfaceName)
+		return connPath, nil
+	}
+	klog.Infof("No existing connection for interface %s: %v", interfaceName, err)
+
+	// No existing connection found, create a new one
+	connName := interfaceName
+	klog.Infof("Creating new NM connection %q (type=%s) for interface %s", connName, connType, interfaceName)
+	if err := n.createConnection(connName, connType, interfaceName); err != nil {
+		return "", fmt.Errorf("failed to create connection for interface %s: %w", interfaceName, err)
+	}
+
+	// Retrieve the path of the newly created connection
+	connPath, err = n.getConnectionForInterface(interfaceName)
+	if err != nil {
+		return "", fmt.Errorf("created connection for %s but failed to find it: %w", interfaceName, err)
+	}
+	klog.Infof("Created and found new connection %s for interface %s", connPath, interfaceName)
+	return connPath, nil
+}
+
+// trackModifiedConnection records a connection path that was modified and needs activation
+func (n *NetworkManagerBackend) trackModifiedConnection(connPath dbus.ObjectPath) {
+	for _, p := range n.modifiedConnPaths {
+		if p == connPath {
+			return // already tracked
+		}
+	}
+	n.modifiedConnPaths = append(n.modifiedConnPaths, connPath)
 }
 
 // listConnections lists all NetworkManager connections
@@ -463,41 +529,66 @@ func (n *NetworkManagerBackend) createConnection(connName, connType, interfaceNa
 		return fmt.Errorf("failed to add connection: %w", err)
 	}
 
-	klog.V(3).Infof("Created connection %s at %s", connName, connPath)
+	klog.Infof("Created connection %s at %s", connName, connPath)
 	return nil
 }
 
-// getConnectionSettings retrieves settings for a connection
-func (n *NetworkManagerBackend) getConnectionSettings(connPath dbus.ObjectPath) (map[string]map[string]dbus.Variant, error) {
-	conn, err := n.getDBusConn()
-	if err != nil {
-		return nil, err
-	}
-
-	obj := conn.Object(nmService, connPath)
-	var settings map[string]map[string]dbus.Variant
-	err = obj.Call(nmConnIface+".GetSettings", 0).Store(&settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get settings: %w", err)
-	}
-
-	return settings, nil
-}
-
-// updateConnection updates a connection with new settings
-func (n *NetworkManagerBackend) updateConnection(connPath dbus.ObjectPath, settings map[string]map[string]dbus.Variant) error {
+// updateConnection reads the existing connection settings, merges in the provided changes,
+// and writes back the result. NM's Update replaces all settings, so we must include required
+// properties like connection.id. Complex-typed properties that Go's dbus library can't
+// round-trip (e.g. ipv6.addresses) are stripped from sections we don't modify.
+func (n *NetworkManagerBackend) updateConnection(connPath dbus.ObjectPath, changes map[string]map[string]dbus.Variant) error {
 	conn, err := n.getDBusConn()
 	if err != nil {
 		return err
 	}
 
 	obj := conn.Object(nmService, connPath)
-	err = obj.Call(nmConnIface+".Update", 0, settings).Err
+
+	// Read existing settings
+	var existing map[string]map[string]dbus.Variant
+	err = obj.Call(nmConnIface+".GetSettings", 0).Store(&existing)
+	if err != nil {
+		return fmt.Errorf("failed to read existing settings: %w", err)
+	}
+
+	// Start with only the "connection" section from existing settings (required by NM)
+	// Other sections are only included if they are in our changes.
+	merged := map[string]map[string]dbus.Variant{
+		"connection": existing["connection"],
+	}
+
+	// Apply changes: for each section in changes, merge properties into existing or create new
+	for section, props := range changes {
+		if _, ok := merged[section]; !ok {
+			// Use existing section as base if available, otherwise start fresh
+			if existingSection, ok := existing[section]; ok {
+				merged[section] = existingSection
+			} else {
+				merged[section] = make(map[string]dbus.Variant)
+			}
+		}
+		for key, val := range props {
+			merged[section][key] = val
+		}
+	}
+
+	klog.Infof("Updating connection %s with sections: %v", connPath, sectionNames(merged))
+	err = obj.Call(nmConnIface+".Update", 0, merged).Err
 	if err != nil {
 		return fmt.Errorf("failed to update connection: %w", err)
 	}
 
 	return nil
+}
+
+// sectionNames returns the keys of a settings map for logging
+func sectionNames(settings map[string]map[string]dbus.Variant) []string {
+	names := make([]string, 0, len(settings))
+	for k := range settings {
+		names = append(names, k)
+	}
+	return names
 }
 
 // activateConnection activates a connection
@@ -518,40 +609,4 @@ func (n *NetworkManagerBackend) activateConnection(connPath dbus.ObjectPath) err
 	}
 
 	return nil
-}
-
-// checkBridgeMTUChangeNeeded determines if the bridge and its member interfaces need MTU changes
-func (n *NetworkManagerBackend) checkBridgeMTUChangeNeeded(bridgeName string, desiredMTU int) (bool, error) {
-	// Check current bridge MTU
-	currentBridgeMTU, err := util.GetCurrentMTU(bridgeName)
-	if err != nil {
-		return false, fmt.Errorf("failed to get current bridge MTU: %w", err)
-	}
-
-	// If bridge MTU differs, we need to apply changes
-	if currentBridgeMTU != desiredMTU {
-		klog.Infof("Bridge %s MTU mismatch (current=%d, desired=%d)", bridgeName, currentBridgeMTU, desiredMTU)
-		return true, nil
-	}
-
-	// Check all member interface MTUs
-	memberNames, err := util.GetBridgeMembers(bridgeName)
-	if err != nil {
-		return false, fmt.Errorf("failed to get bridge members for %s: %w", bridgeName, err)
-	}
-
-	// Check if any member interface has different MTU
-	for _, memberName := range memberNames {
-		currentMTU, err := util.GetCurrentMTU(memberName)
-		if err != nil {
-			return false, fmt.Errorf("failed to get current MTU for bridge member %s: %w", memberName, err)
-		}
-		if currentMTU != desiredMTU {
-			klog.Infof("Bridge member %s MTU mismatch (current=%d, desired=%d)", memberName, currentMTU, desiredMTU)
-			return true, nil
-		}
-	}
-
-	// No changes needed - all MTUs match desired state
-	return false, nil
 }
