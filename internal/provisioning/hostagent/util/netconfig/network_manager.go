@@ -18,7 +18,6 @@ const (
 	nmSettingsPath  = "/org/freedesktop/NetworkManager/Settings"
 	nmSettingsIface = "org.freedesktop.NetworkManager.Settings"
 	nmConnIface     = "org.freedesktop.NetworkManager.Settings.Connection"
-	nmIface         = "org.freedesktop.NetworkManager"
 )
 
 // NetworkManagerBackend implements Backend interface using NetworkManager via D-Bus
@@ -117,9 +116,8 @@ func (n *NetworkManagerBackend) ConfigurePFInterfaces(pciAddress string, portCon
 			return false, fmt.Errorf("failed to get/create connection for PF%d (%s): %w", portConfig.PortNumber, interfaceName, err)
 		}
 
-		// Build minimal settings with only the properties that need changing.
-		// We avoid read-modify-write of the full settings because Go's dbus library
-		// may deserialize complex NM types (e.g. ipv6.addresses) into incompatible formats.
+		// Build settings with only the properties that need changing.
+		// updateConnection will merge these into the full existing settings.
 		updateSettings := make(map[string]map[string]dbus.Variant)
 		modified := false
 
@@ -195,9 +193,8 @@ func (n *NetworkManagerBackend) ConfigureBridgeMTU(bridgeName string, mtu int) (
 			return false, fmt.Errorf("failed to get/create connection for bridge %s: %w", bridgeName, err)
 		}
 
-		// Build minimal settings with only the properties we need to modify.
-		// We avoid read-modify-write of the full settings because Go's dbus library
-		// may deserialize complex NM types (e.g. ipv6.addresses) into incompatible formats.
+		// Build settings with only the properties we need to modify.
+		// updateConnection will merge these into the full existing settings.
 		bridgeSettings := map[string]map[string]dbus.Variant{
 			"bridge": {},
 		}
@@ -237,7 +234,8 @@ func (n *NetworkManagerBackend) ConfigureBridgeMTU(bridgeName string, mtu int) (
 			return false, fmt.Errorf("failed to get/create connection for member %s: %w", memberName, err)
 		}
 
-		// Build minimal settings with only the properties we need to modify.
+		// Build settings with only the properties we need to modify.
+		// updateConnection will merge these into the full existing settings.
 		memberSettings := map[string]map[string]dbus.Variant{
 			"802-3-ethernet": {
 				"mtu": dbus.MakeVariant(uint32(mtu)),
@@ -264,66 +262,13 @@ func (n *NetworkManagerBackend) ConfigureBridgeMTU(bridgeName string, mtu int) (
 func (n *NetworkManagerBackend) ApplyConfiguration() error {
 	klog.Infof("Activating NetworkManager connections")
 
-	// First, activate any connections that were modified by interface name lookups
-	// (e.g. from ConfigureBridgeMTU). These may have arbitrary names.
-	activated := make(map[dbus.ObjectPath]bool)
 	for _, connPath := range n.modifiedConnPaths {
 		klog.Infof("Activating modified connection %s", connPath)
 		if err := n.activateConnection(connPath); err != nil {
 			klog.Infof("Failed to activate modified connection %s (may be expected): %v", connPath, err)
 		}
-		activated[connPath] = true
 	}
 	n.modifiedConnPaths = nil
-
-	conn, err := n.getDBusConn()
-	if err != nil {
-		return err
-	}
-
-	// List all connections
-	connections, err := n.listConnections()
-	if err != nil {
-		return fmt.Errorf("failed to list connections: %w", err)
-	}
-
-	// Activate all dpu-* connections (from ConfigurePFInterfaces etc.)
-	for _, connPath := range connections {
-		// Skip if already activated above
-		if activated[connPath] {
-			continue
-		}
-
-		connObj := conn.Object(nmService, connPath)
-
-		var settings map[string]map[string]dbus.Variant
-		err := connObj.Call(nmConnIface+".GetSettings", 0).Store(&settings)
-		if err != nil {
-			continue
-		}
-
-		// Get connection ID
-		idVariant, ok := settings["connection"]["id"]
-		if !ok {
-			continue
-		}
-
-		connID, ok := idVariant.Value().(string)
-		if !ok {
-			continue
-		}
-
-		// Only activate dpu-* connections
-		if len(connID) < 4 || connID[:4] != "dpu-" {
-			continue
-		}
-
-		klog.Infof("Activating connection %s", connID)
-		// Try to activate, but don't fail if already active or device unavailable
-		if err := n.activateConnection(connPath); err != nil {
-			klog.Infof("Failed to activate connection %s (may be expected): %v", connID, err)
-		}
-	}
 
 	return nil
 }
@@ -533,10 +478,23 @@ func (n *NetworkManagerBackend) createConnection(connName, connType, interfaceNa
 	return nil
 }
 
-// updateConnection reads the existing connection settings, merges in the provided changes,
-// and writes back the result. NM's Update replaces all settings, so we must include required
-// properties like connection.id. Complex-typed properties that Go's dbus library can't
-// round-trip (e.g. ipv6.addresses) are stripped from sections we don't modify.
+// unsafeRoundtripProps lists per-section properties whose D-Bus types (e.g. struct
+// types like a(ayuay) for ipv6.addresses) are not preserved by Go's dbus library
+// during deserialization and re-serialization. These deprecated NM properties are
+// stripped before sending settings back to NM's Update method. Their modern
+// equivalents (address-data, route-data) use map-based D-Bus types (aa{sv}) that
+// round-trip correctly through the Go dbus library.
+var unsafeRoundtripProps = map[string][]string{
+	"ipv4": {"addresses", "routes"},
+	"ipv6": {"addresses", "routes"},
+}
+
+// updateConnection reads the full existing connection settings, overlays only the
+// changed properties from `changes`, and writes back the complete result.
+// NM's Update method does a full replacement, so we must pass through ALL existing
+// sections (ipv4, ipv6, etc.) to avoid dropping configuration we didn't intend to modify.
+// Properties with D-Bus struct types that Go's dbus library cannot round-trip are
+// stripped (see unsafeRoundtripProps); their modern equivalents are preserved.
 func (n *NetworkManagerBackend) updateConnection(connPath dbus.ObjectPath, changes map[string]map[string]dbus.Variant) error {
 	conn, err := n.getDBusConn()
 	if err != nil {
@@ -545,28 +503,30 @@ func (n *NetworkManagerBackend) updateConnection(connPath dbus.ObjectPath, chang
 
 	obj := conn.Object(nmService, connPath)
 
-	// Read existing settings
+	// Read ALL existing settings — every section is preserved in the merged result
 	var existing map[string]map[string]dbus.Variant
 	err = obj.Call(nmConnIface+".GetSettings", 0).Store(&existing)
 	if err != nil {
 		return fmt.Errorf("failed to read existing settings: %w", err)
 	}
 
-	// Start with only the "connection" section from existing settings (required by NM)
-	// Other sections are only included if they are in our changes.
-	merged := map[string]map[string]dbus.Variant{
-		"connection": existing["connection"],
+	// Start from the full existing settings so unmodified sections (ipv4, ipv6, etc.) are kept
+	merged := existing
+
+	// Strip deprecated properties whose D-Bus struct types don't survive the
+	// Go dbus Variant round-trip (e.g. ipv6.addresses type a(ayuay) → aav).
+	for section, props := range unsafeRoundtripProps {
+		if sectionMap, ok := merged[section]; ok {
+			for _, prop := range props {
+				delete(sectionMap, prop)
+			}
+		}
 	}
 
-	// Apply changes: for each section in changes, merge properties into existing or create new
+	// Overlay only the specific properties we're changing
 	for section, props := range changes {
-		if _, ok := merged[section]; !ok {
-			// Use existing section as base if available, otherwise start fresh
-			if existingSection, ok := existing[section]; ok {
-				merged[section] = existingSection
-			} else {
-				merged[section] = make(map[string]dbus.Variant)
-			}
+		if merged[section] == nil {
+			merged[section] = make(map[string]dbus.Variant)
 		}
 		for key, val := range props {
 			merged[section][key] = val
@@ -577,6 +537,14 @@ func (n *NetworkManagerBackend) updateConnection(connPath dbus.ObjectPath, chang
 	err = obj.Call(nmConnIface+".Update", 0, merged).Err
 	if err != nil {
 		return fmt.Errorf("failed to update connection: %w", err)
+	}
+
+	// Reload connections so NetworkManager re-reads the updated profile from disk
+	settingsObj := conn.Object(nmService, nmSettingsPath)
+	var success bool
+	err = settingsObj.Call(nmSettingsIface+".ReloadConnections", 0).Store(&success)
+	if err != nil || !success {
+		return fmt.Errorf("failed to reload connections after updating %s (success=%t): %w", connPath, success, err)
 	}
 
 	return nil
@@ -603,7 +571,7 @@ func (n *NetworkManagerBackend) activateConnection(connPath dbus.ObjectPath) err
 	// ActivateConnection(connection, device, specific_object)
 	// device and specific_object can be "/" for auto-selection
 	var activeConnPath dbus.ObjectPath
-	err = obj.Call(nmIface+".ActivateConnection", 0, connPath, dbus.ObjectPath("/"), dbus.ObjectPath("/")).Store(&activeConnPath)
+	err = obj.Call(nmService+".ActivateConnection", 0, connPath, dbus.ObjectPath("/"), dbus.ObjectPath("/")).Store(&activeConnPath)
 	if err != nil {
 		return fmt.Errorf("failed to activate connection: %w", err)
 	}
