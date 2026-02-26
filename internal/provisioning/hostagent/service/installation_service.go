@@ -44,14 +44,22 @@ const (
 	DefaultServicePort = 11029
 )
 
-type InstallationService struct {
-	client.Client
-	server *http.Server
+// NetworkConfigurator is an interface for triggering host network configuration.
+// It is satisfied by networkmanager.NetworkManager.
+type NetworkConfigurator interface {
+	AddNetworkRequest(dpu *provisioningv1.DPU) error
 }
 
-func NewInstallationService(client client.Client, listenAddr string) *InstallationService {
+type InstallationService struct {
+	client.Client
+	server         *http.Server
+	networkManager NetworkConfigurator
+}
+
+func NewInstallationService(client client.Client, listenAddr string, nm NetworkConfigurator) *InstallationService {
 	s := &InstallationService{
-		Client: client,
+		Client:         client,
+		networkManager: nm,
 	}
 	ws := new(restful.WebService).Path("/")
 	ws.Route(
@@ -68,6 +76,11 @@ func NewInstallationService(client client.Client, listenAddr string) *Installati
 			Param(ws.QueryParameter("name", "the name of the object").Required(true)).
 			Produces(restful.MIME_JSON).
 			To(s.GetObject))
+	ws.Route(
+		ws.POST("/configure-host-vfs").
+			Consumes(restful.MIME_JSON).
+			Produces(restful.MIME_JSON).
+			To(s.ConfigureHostVF))
 	ws.Route(ws.GET("/healthz").To(s.HealthCheck))
 	container := restful.NewContainer()
 	container.Add(ws)
@@ -106,6 +119,38 @@ func (s *InstallationService) Stop() {
 }
 
 func (s *InstallationService) HealthCheck(req *restful.Request, resp *restful.Response) {
+	resp.WriteHeader(http.StatusOK)
+}
+
+func (s *InstallationService) ConfigureHostVF(req *restful.Request, resp *restful.Response) {
+	var request types.ConfigureHostVFRequest
+	if err := req.ReadEntity(&request); err != nil {
+		klog.Errorf("failed to read configure host VF request: %v", err)
+		_ = resp.WriteError(http.StatusBadRequest, err)
+		return
+	}
+	klog.Infof("Received configure host VF request: %#v", request)
+
+	if s.networkManager == nil {
+		klog.Errorf("network manager is not configured")
+		_ = resp.WriteError(http.StatusServiceUnavailable, fmt.Errorf("network manager is not configured"))
+		return
+	}
+
+	dpu := &provisioningv1.DPU{}
+	if err := s.Get(req.Request.Context(), client.ObjectKey{Namespace: request.DPUNamespace, Name: request.DPUName}, dpu); err != nil {
+		klog.Errorf("failed to get DPU %s/%s: %v", request.DPUNamespace, request.DPUName, err)
+		_ = resp.WriteError(http.StatusNotFound, err)
+		return
+	}
+
+	if err := s.networkManager.AddNetworkRequest(dpu); err != nil {
+		klog.Errorf("failed to add network request for DPU %s/%s: %v", request.DPUNamespace, request.DPUName, err)
+		_ = resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	klog.Infof("Successfully added network request for DPU %s/%s", request.DPUNamespace, request.DPUName)
 	resp.WriteHeader(http.StatusOK)
 }
 

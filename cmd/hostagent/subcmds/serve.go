@@ -72,10 +72,6 @@ var serveCmd = &cobra.Command{
 			klog.Fatalf("failed to convert VF config to network request: %v", err)
 		}
 
-		if err := service.NewInstallationService(unCachedClient, fmt.Sprintf("%s:%d", service.DefaultServiceIP, service.DefaultServicePort)).Start(true); err != nil {
-			klog.Fatalf("failed to start installation service: %v", err)
-		}
-
 		mgr, err := ctrl.NewManager(clientCfg, ctrl.Options{
 			Scheme: scheme,
 			Metrics: metricsserver.Options{
@@ -106,6 +102,10 @@ var serveCmd = &cobra.Command{
 		if err := nm.Start(); err != nil {
 			setupLog.Error(err, "unable to start network manager")
 			os.Exit(1)
+		}
+
+		if err := service.NewInstallationService(unCachedClient, fmt.Sprintf("%s:%d", service.DefaultServiceIP, service.DefaultServicePort), nm).Start(true); err != nil {
+			klog.Fatalf("failed to start installation service: %v", err)
 		}
 
 		reconciler := hostagent.NewHostAgentReconciler(mgr.GetClient(), opts.BFBRegistryAddress, dpuNodeManager, nm)

@@ -25,3 +25,8 @@ type UpdateStatusRequest struct {
 	DPUNamespace string                           `json:"dpuNamespace"`
 	DPUInfo      provisioningv1.DPUInternalStatus `json:"dpuInfo"`
 }
+
+type ConfigureHostVFRequest struct {
+	DPUName      string `json:"dpuName"`
+	DPUNamespace string `json:"dpuNamespace"`
+}
