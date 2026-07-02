@@ -39,3 +39,11 @@ type TriggerRebootRequest struct {
 	DPUUID       string                          `json:"dpuUID"`
 	RebootMethod provisioningv1.RebootMethodType `json:"rebootMethod"`
 }
+
+type SetErrorRequest struct {
+	DPUName      string `json:"dpuName"`
+	DPUNamespace string `json:"dpuNamespace"`
+	DPUUID       string `json:"dpuUID"`
+	Reason       string `json:"reason"`
+	Message      string `json:"message"`
+}
