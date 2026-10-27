@@ -28,12 +28,28 @@ import (
 )
 
 const (
-	testPCIAddress = "0000:c9:00.0"
-	testPCITarget  = "pci/0000:c9:00.0"
+	testPCIAddress = "c9:00.0"
+	stateModePath  = "nvidia/mode/state/mode"
+	configModePath = "nvidia/mode/config/mode"
 )
 
-func dmsModeFixture(mode string) string {
-	return fmt.Sprintf(`{ "operating-mode": %q }`, mode)
+func dmsModeFixture(path, mode string) string {
+	return fmt.Sprintf(`[
+  {
+    "source": "127.0.0.1:9339",
+    "timestamp": 1761796906478936518,
+    "time": "2025-10-30T04:01:46.478936518Z",
+    "target": "c9:00.0",
+    "updates": [
+      {
+        "Path": %q,
+        "values": {
+          %q: %q
+        }
+      }
+    ]
+  }
+]`, path, path, mode)
 }
 
 func runBashWithOutput(output string) func(string) (bytes.Buffer, bytes.Buffer, error) {
@@ -44,23 +60,23 @@ func runBashWithOutput(output string) func(string) (bytes.Buffer, bytes.Buffer, 
 	}
 }
 
-// TestGetDPUMode_CommandVerification verifies the dms-cli command queries the operating mode.
+// TestGetDPUMode_CommandVerification verifies the dmsc get command targets state mode only.
 func TestGetDPUMode_CommandVerification(t *testing.T) {
 	var capturedCmd string
 	runBash := func(cmd string) (bytes.Buffer, bytes.Buffer, error) {
 		capturedCmd = cmd
-		return runBashWithOutput(dmsModeFixture("dpu"))(cmd)
+		return runBashWithOutput(dmsModeFixture(stateModePath, "DPU"))(cmd)
 	}
 
 	mode, err := getDPUMode(testPCIAddress, runBash)
 	require.NoError(t, err)
 	assert.Equal(t, provisioningv1.DpuMode, mode)
-	assert.Contains(t, capturedCmd, "--target "+testPCITarget)
-	assert.Contains(t, capturedCmd, "--json /nvidia/mode/operating-mode")
-	assert.NotContains(t, capturedCmd, "operating-mode-pending")
+	assert.Contains(t, capturedCmd, "--path /nvidia/mode/state/mode")
+	assert.NotContains(t, capturedCmd, "/nvidia/mode/config/mode")
+	assert.Contains(t, capturedCmd, testPCIAddress)
 }
 
-// TestGetDPUMode_Parsing tests parsing verified DMS operating mode responses.
+// TestGetDPUMode_Parsing tests parsing verified DMS state mode responses.
 func TestGetDPUMode_Parsing(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -75,7 +91,7 @@ func TestGetDPUMode_Parsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, err := getDPUMode(testPCIAddress, runBashWithOutput(dmsModeFixture(tt.rawMode)))
+			mode, err := getDPUMode(testPCIAddress, runBashWithOutput(dmsModeFixture(stateModePath, tt.rawMode)))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedMode, mode)
 		})
@@ -91,13 +107,13 @@ func TestGetDPUMode_ErrorCases(t *testing.T) {
 		errorValue    string
 	}{
 		{
-			name:          "pending-only output rejected",
-			mockOutput:    `{ "operating-mode-pending": "dpu" }`,
+			name:          "config-only output rejected",
+			mockOutput:    dmsModeFixture(configModePath, "DPU"),
 			expectedError: "failed to parse DPU mode",
 		},
 		{
-			name:          "missing operating mode field",
-			mockOutput:    `{}`,
+			name:          "missing state mode field",
+			mockOutput:    `[{"updates":[{"Path":"nvidia/mode/state/mode","values":{}}]}]`,
 			expectedError: "failed to parse DPU mode",
 		},
 		{
@@ -107,13 +123,13 @@ func TestGetDPUMode_ErrorCases(t *testing.T) {
 		},
 		{
 			name:          "zero-trust mode rejected",
-			mockOutput:    dmsModeFixture("zero-trust"),
+			mockOutput:    dmsModeFixture(stateModePath, "zero-trust"),
 			expectedError: "unsupported DPU mode",
 			errorValue:    "zero-trust",
 		},
 		{
 			name:          "unknown mode rejected",
-			mockOutput:    dmsModeFixture("hypervisor"),
+			mockOutput:    dmsModeFixture(stateModePath, "hypervisor"),
 			expectedError: "unsupported DPU mode",
 			errorValue:    "hypervisor",
 		},
@@ -146,8 +162,8 @@ func TestGetDPUMode_CommandFailureContext(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, mode)
 	assert.Contains(t, err.Error(), "failed to run cmd:")
-	assert.Contains(t, err.Error(), testPCITarget)
-	assert.Contains(t, err.Error(), "/nvidia/mode/operating-mode")
+	assert.Contains(t, err.Error(), testPCIAddress)
+	assert.Contains(t, err.Error(), "--path /nvidia/mode/state/mode")
 	assert.Contains(t, err.Error(), "partial output")
 	assert.Contains(t, err.Error(), "connection refused")
 	assert.ErrorIs(t, err, cause)
